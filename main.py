@@ -3,6 +3,8 @@ import random
 import time
 import os
 from win32com.client import Dispatch
+import ctypes
+from ctypes import wintypes
 
 # global
 MEDIA_PLAYER = Dispatch('WMPlayer.OCX')
@@ -161,7 +163,6 @@ class WatchDog(threading.Thread):
         time.sleep(1)
         while not self.watch_thread.thread_is_sleeping:
             time.sleep(0.1)
-        self.GUI.SET_LABEL('ULT_STATUS', '线程重启\n')
         self.watch_thread.flag = True
         self.watch_thread.restart(JS_DATA=self.watch_thread.JS_DATA)
 
@@ -183,6 +184,7 @@ class App(threading.Thread):
 
     flag = True
     thread_is_sleeping = False
+    thread_is_running = False
     MEDIA_PLAYER.settings.volume = 80
     MEDIA_VOLUME = 80
     INTERVAL = 0.50
@@ -220,16 +222,32 @@ class App(threading.Thread):
         self.mainloop()
 
     def getHWND(self):
-        while True:
+        hwnd = 0
+        while self.flag:
             hwnd = self.win32gui.FindWindow(None, "Apex Legends")
             if hwnd != 0:
                 break
             self.GUI.SET_LABEL('RUNTIME_STATUS', '未捕获到 Apex 窗口')
             time.sleep(self.INTERVAL)
-        rect = self.win32gui.GetWindowRect(hwnd)
-        width, height = rect[2] - rect[0], rect[3] - rect[1]
-        self.GUI.SET_LABEL('RUNTIME_STATUS', '捕获到Apex窗口:  (cost: NaN s)\nid=%s, size=(%d, %d)' % (hwnd, width, height))
-        return hwnd, (width, height)
+        if self.flag:
+            try:
+                f = ctypes.windll.dwmapi.DwmGetWindowAttribute
+            except WindowsError:
+                f = None
+            if f:
+                rect = ctypes.wintypes.RECT()
+                DWMWA_EXTENDED_FRAME_BOUNDS = 9
+                f(wintypes.HWND(hwnd),
+                  wintypes.DWORD(DWMWA_EXTENDED_FRAME_BOUNDS),
+                  ctypes.byref(rect),
+                  ctypes.sizeof(rect)
+                  )
+            width, height = rect.right - rect.left, rect.bottom - rect.top
+            self.GUI.SET_LABEL('RUNTIME_STATUS',
+                               '捕获到Apex窗口:  (cost: NaN s)\nid=%s, size=(%d, %d)' % (hwnd, width, height))
+            return hwnd, (width, height)
+        else:
+            return self.thread_sleep()
 
     def getImage(self, HWND, ScreenSize):
         hWndDC = self.win32gui.GetWindowDC(HWND)
@@ -309,7 +327,6 @@ class App(threading.Thread):
             while True:
                 st = time.time()
                 self.WATCH_DOG.set_keep_watch(True)
-                time.sleep(self.INTERVAL)
                 img = self.fetch_window_image(hwnd, window_size)
                 if self.image_check('uav', img, js_data, dpi):
                     # enter uav playing thread
@@ -318,8 +335,8 @@ class App(threading.Thread):
                     cost = time.time() - st
                     self.GUI.SET_LABEL('RUNTIME_STATUS',
                                        '捕获到Apex窗口:  (cost: %.3f s)\nid=%s, size=(%d, %d)' % (cost, hwnd, *window_size))
-                    self.WATCH_DOG.check(1.0)
-                    time.sleep(self.INTERVAL)
+                    self.WATCH_DOG.check()
+                    time.sleep(self.INTERVAL * 2)
                     continue
                 player_thread.stop()
                 self.WATCH_DOG.set_keep_watch(False)
@@ -328,7 +345,7 @@ class App(threading.Thread):
                 break
             time.sleep(self.INTERVAL)
             self.GUI.SET_LABEL('ULT_STATUS', '播放器冷却中\n')
-            time.sleep(1.5)
+            time.sleep(1)
 
     def create_play_num_list(self, state):
         music_num = len(self.MUSIC_LIST[state])
@@ -352,12 +369,14 @@ class App(threading.Thread):
         return hwnd, window_size, dpi, self.JS_DATA
 
     def mainloop(self):
+        self.thread_is_running = True
         hwnd, window_size, dpi, js_data = self.init()
         self.FUNC_DICT[self.JS_DATA['id']](hwnd, window_size, dpi, js_data)
         return self.thread_sleep()
 
     def thread_sleep(self):
         self.thread_is_sleeping = True
+        self.thread_is_running = False
         while self.thread_is_sleeping:
             time.sleep(0.5)
         return self.mainloop()
@@ -366,10 +385,14 @@ class App(threading.Thread):
         self.thread_is_sleeping = False
 
     def restart(self, JS_DATA):
+        self.GUI.SET_LABEL('ULT_STATUS', '线程重启\n')
         MEDIA_PLAYER.controls.stop()
         self.flag = True
         self.JS_DATA = JS_DATA
         self.thread_awake()
+        while not self.thread_is_running:
+            time.sleep(0.1)
+        self.GUI.SET_LABEL('ULT_STATUS', '线程重启成功\n')
 
     def fetch_window_image(self, hwnd, window_size):
         try:
@@ -399,11 +422,11 @@ class App(threading.Thread):
             if ult_charge >= 40.0:
                 if self.image_check('ult_is_flying', img, js_data, dpi):
                     # ult-play
+                    img.close()
+                    del img
                     self.WATCH_DOG.set_keep_watch(False)
                     self.play_music('ult')
                     ult_charge = 0
-                    img.close()
-                    del img
                     interval = self.INTERVAL
                     time.sleep(interval)
                     continue
@@ -411,11 +434,11 @@ class App(threading.Thread):
                 self.GUI.SET_LABEL('ULT_STATUS', '大招未使用\n')
                 if self.image_check('ult_is_flying', img, js_data, dpi):
                     # para-play
+                    img.close()
+                    del img
                     self.WATCH_DOG.set_keep_watch(False)
                     self.play_music('para')
                     ult_charge = 0
-                    img.close()
-                    del img
                     interval = self.INTERVAL
                     time.sleep(interval)
                     continue
@@ -439,10 +462,12 @@ class App(threading.Thread):
             if self.image_check('uav', img, js_data, dpi):
                 # enter uav playing thread
                 self.WATCH_DOG.set_keep_watch(False)
-                self.play_music('uav', hwnd, window_size, dpi, js_data)
                 img.close()
                 del img
+                self.play_music('uav', hwnd, window_size, dpi, js_data)
                 continue
+            else:
+                self.GUI.SET_LABEL('ULT_STATUS', '无人机未使用\n')
             img.close()
             del img
             cost = time.time() - st
@@ -493,7 +518,13 @@ class PlayerThread(threading.Thread):
             MEDIA_PLAYER.controls.play()
             time.sleep(self.app.INTERVAL)
             MEDIA_PLAYER.controls.playItem(self.media)
-            time.sleep(self.media.duration)
+            count = 1
+            max_count = int(self.media.duration) + 1
+            while count <= max_count:
+                if not self.flag:
+                    return self.thread_close()
+                time.sleep(1)
+                count += 1
             time.sleep(self.app.INTERVAL)
             MEDIA_PLAYER.currentPlaylist.removeItem(self.media)
             self.media = None
@@ -516,6 +547,8 @@ class PlayerThread(threading.Thread):
                 t += 1
                 time.sleep(0.1)
             MEDIA_PLAYER.settings.volume = 0
+            MEDIA_PLAYER.currentPlaylist.removeItem(self.media)
+            self.media = None
         while self.is_playing:
             time.sleep(0.1)
         MEDIA_PLAYER.controls.stop()
